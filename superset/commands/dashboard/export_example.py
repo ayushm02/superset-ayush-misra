@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from io import BytesIO
 from typing import Any, Callable, TYPE_CHECKING
 
+import sqlalchemy as sa
 import yaml
 
 from superset.commands.base import BaseCommand
@@ -256,7 +257,7 @@ def export_dataset_data(
 
         # Check if this is a virtual dataset (SQL-based)
         if dataset.sql:
-            sql = dataset.sql
+            sql: str | sa.Select = dataset.sql
         else:
             # For physical tables, build SELECT query from columns
             columns = [col.column_name for col in dataset.columns if not col.expression]
@@ -265,14 +266,13 @@ def export_dataset_data(
                 logger.warning("No columns to export for %s", dataset.table_name)
                 return None
 
-            # Build simple SELECT query (quote identifiers to handle spaces/keywords)
-            column_list = ", ".join(f'"{c}"' for c in columns)
-            quoted_table = f'"{dataset.table_name}"'
-            if dataset.schema:
-                table_ref = f'"{dataset.schema}".{quoted_table}'
-            else:
-                table_ref = quoted_table
-            sql = f"SELECT {column_list} FROM {table_ref}"  # noqa: S608
+            # Build SELECT query using SQLAlchemy Core constructs
+            tbl = sa.table(
+                dataset.table_name,
+                *(sa.column(c) for c in columns),
+                schema=dataset.schema,
+            )
+            sql = sa.select(*(sa.column(c) for c in columns)).select_from(tbl)
 
         with dataset.database.get_sqla_engine() as engine:
             df = pd.read_sql(sql, engine)
