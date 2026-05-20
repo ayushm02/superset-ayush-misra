@@ -24,26 +24,13 @@ function createStyleElement(className: string) {
   return style;
 }
 
-// The original, non-typescript code referenced `style.styleSheet`.
-// I can't find what sort of element would have a styleSheet property,
-// so have created this type to satisfy TS without changing behavior.
-type MysteryStyleElement = {
-  styleSheet: {
-    cssText: string;
-  };
-};
-
 export default function injectCustomCss(css: string) {
   const className = 'CssEditor-css';
   const head = document.head || document.getElementsByTagName('head')[0];
   const style: HTMLStyleElement =
     document.querySelector(`.${className}`) || createStyleElement(className);
 
-  if ('styleSheet' in style) {
-    (style as HTMLStyleElement & MysteryStyleElement).styleSheet.cssText = css;
-  } else {
-    style.innerHTML = css;
-  }
+  style.textContent = css;
 
   /**
    * Ensures that the style applied is always the last.
