@@ -17,12 +17,17 @@
  * under the License.
  */
 /* eslint camelcase: 0 */
-import { ChangeEvent, FormEvent, Component } from 'react';
-import { Dispatch } from 'redux';
+import {
+  ChangeEvent,
+  FormEvent,
+  useCallback,
+  useEffect,
+  useState,
+} from 'react';
+import { useDispatch, useSelector } from 'react-redux';
 import { nanoid } from 'nanoid';
 import rison from 'rison';
-import { connect } from 'react-redux';
-import { withRouter, RouteComponentProps } from 'react-router-dom';
+import { useHistory } from 'react-router-dom';
 import {
   InfoTooltip,
   Button,
@@ -41,12 +46,7 @@ import { logging } from '@apache-superset/core/utils';
 import { t } from '@apache-superset/core/translation';
 import { DatasourceType, isDefined, SupersetClient } from '@superset-ui/core';
 import { Alert } from '@apache-superset/core/components';
-import {
-  css,
-  styled,
-  withTheme,
-  type SupersetTheme,
-} from '@apache-superset/core/theme';
+import { css, styled, useTheme } from '@apache-superset/core/theme';
 import { Radio } from '@superset-ui/core/components/Radio';
 import { GRID_COLUMN_COUNT } from 'src/dashboard/util/constants';
 import { canUserEditDashboard } from 'src/dashboard/util/permissionUtils';
@@ -61,34 +61,14 @@ import { Dashboard } from 'src/types/Dashboard';
 import { TabNode, TabTreeNode } from '../types';
 import { CHART_WIDTH, CHART_HEIGHT } from 'src/dashboard/constants';
 
-// Session storage key for recent dashboard
 const SK_DASHBOARD_ID = 'save_chart_recent_dashboard';
 
-interface SaveModalProps extends RouteComponentProps {
+interface SaveModalProps {
   addDangerToast: (msg: string) => void;
-  actions: Record<string, any>;
-  form_data?: Record<string, any>;
-  user: UserWithPermissionsAndRoles;
-  alert?: string;
+  actions: Record<string, Function>;
+  form_data?: Record<string, unknown>;
   sliceName?: string;
-  slice?: Record<string, any>;
-  datasource?: Record<string, any>;
-  dashboardId: '' | number | null;
-  isVisible: boolean;
-  dispatch: Dispatch;
-  theme: SupersetTheme;
 }
-
-type SaveModalState = {
-  newSliceName?: string;
-  datasetName: string;
-  action: SaveActionType;
-  isLoading: boolean;
-  saveStatus?: string | null;
-  dashboard?: { label: string; value: string | number };
-  selectedTab?: { label: string; value: string | number };
-  tabsData: TabTreeNode[];
-};
 
 export const StyledModal = styled(Modal)`
   .ant-modal-body {
@@ -96,662 +76,711 @@ export const StyledModal = styled(Modal)`
   }
 `;
 
-class SaveModal extends Component<SaveModalProps, SaveModalState> {
-  constructor(props: SaveModalProps) {
-    super(props);
-    this.state = {
-      newSliceName: props.sliceName,
-      datasetName: props.datasource?.name,
-      action: this.canOverwriteSlice()
-        ? ChartStatusType.overwrite
-        : ChartStatusType.saveas,
-      isLoading: false,
-      dashboard: undefined,
-      tabsData: [],
-      selectedTab: undefined,
-    };
-    this.onDashboardChange = this.onDashboardChange.bind(this);
-    this.onSliceNameChange = this.onSliceNameChange.bind(this);
-    this.changeAction = this.changeAction.bind(this);
-    this.saveOrOverwrite = this.saveOrOverwrite.bind(this);
-    this.isNewDashboard = this.isNewDashboard.bind(this);
-    this.onHide = this.onHide.bind(this);
-  }
+export function handleRedirect(
+  windowLocationSearch: string,
+  chart: { id: number },
+): URLSearchParams {
+  const searchParams = new URLSearchParams(windowLocationSearch);
+  searchParams.delete('form_data_key');
+  searchParams.set('slice_id', chart.id.toString());
+  return searchParams;
+}
 
-  isNewDashboard(): boolean {
-    const { dashboard } = this.state;
-    return typeof dashboard?.value === 'string';
-  }
-
-  canOverwriteSlice(): boolean {
-    return (
-      this.props.slice?.owners?.includes(this.props.user.userId) &&
-      !this.props.slice?.is_managed_externally
-    );
-  }
-
-  async componentDidMount() {
-    let { dashboardId } = this.props;
-    if (!dashboardId) {
-      let lastDashboard = null;
-      try {
-        lastDashboard = sessionStorage.getItem(SK_DASHBOARD_ID);
-      } catch (error) {
-        // continue regardless of error
-      }
-      dashboardId = lastDashboard && parseInt(lastDashboard, 10);
-    }
-    if (dashboardId) {
-      try {
-        const result = (await this.loadDashboard(dashboardId)) as Dashboard;
-        if (canUserEditDashboard(result, this.props.user)) {
-          this.setState({
-            dashboard: { label: result.dashboard_title, value: result.id },
-          });
-          await this.loadTabs(dashboardId);
-        }
-      } catch (error) {
-        logging.warn(error);
-        this.props.addDangerToast(
-          t('An error occurred while loading dashboard information.'),
-        );
-      }
-    }
-  }
-
-  handleDatasetNameChange = (e: FormEvent<HTMLInputElement>) => {
-    // @ts-expect-error
-    this.setState({ datasetName: e.target.value });
-  };
-
-  onSliceNameChange(event: ChangeEvent<HTMLInputElement>) {
-    this.setState({ newSliceName: event.target.value });
-  }
-
-  onDashboardChange = async (
-    dashboard:
-      | {
-          label: string;
-          value: string | number;
-        }
-      | undefined,
-  ) => {
-    this.setState({
-      dashboard,
-      tabsData: [],
-      selectedTab: undefined,
+export async function addChartToDashboardTab(
+  dashboardId: number,
+  chartId: number,
+  tabId: string,
+  sliceName: string | undefined,
+): Promise<unknown> {
+  try {
+    const dashboardResponse = await SupersetClient.get({
+      endpoint: `/api/v1/dashboard/${dashboardId}`,
     });
 
-    if (dashboard && typeof dashboard.value === 'number') {
-      await this.loadTabs(dashboard.value);
+    const dashboard = dashboardResponse.json.result;
+
+    let positionJson = dashboard.position_json;
+    if (typeof positionJson === 'string') {
+      positionJson = JSON.parse(positionJson);
     }
-  };
-  changeAction(action: SaveActionType) {
-    this.setState({ action });
-  }
+    positionJson = positionJson || {};
 
-  onHide() {
-    this.props.dispatch(setSaveChartModalVisibility(false));
-  }
+    const chartKey = `CHART-${chartId}`;
 
-  handleRedirect = (windowLocationSearch: string, chart: any) => {
-    const searchParams = new URLSearchParams(windowLocationSearch);
-    searchParams.delete('form_data_key');
-    searchParams.set('slice_id', chart.id.toString());
-    return searchParams;
-  };
+    const tabChildren = positionJson[tabId]?.children || [];
+    let targetRowKey: string | null = null;
 
-  async saveOrOverwrite(gotodash: boolean) {
-    this.setState({ isLoading: true });
-    const tableState = this.props.form_data?.table_state;
-    const sliceId = this.props.slice?.slice_id;
-    const vizType = this.props.form_data?.viz_type;
-    if (sliceId && vizType && tableState) {
-      this.props.dispatch(updateChartState(sliceId, vizType, tableState));
+    for (const childKey of tabChildren) {
+      const child = positionJson[childKey];
+      if (child?.type === 'ROW') {
+        const rowChildren = child.children || [];
+        const totalWidth = rowChildren.reduce((sum: number, key: string) => {
+          const component = positionJson[key];
+          return sum + (component?.meta?.width || 0);
+        }, 0);
+
+        if (totalWidth + CHART_WIDTH <= GRID_COLUMN_COUNT) {
+          targetRowKey = childKey;
+          break;
+        }
+      }
     }
 
-    //  Create or retrieve dashboard
-    type DashboardGetResponse = {
-      id: number;
-      url: string;
-      dashboard_title: string;
-    };
+    const updatedPositionJson = { ...positionJson };
 
-    try {
-      if (this.props.datasource?.type === DatasourceType.Query) {
-        const { schema, sql, database } = this.props.datasource;
-        const { templateParams } = this.props.datasource;
-
-        await this.props.actions.saveDataset({
-          schema,
-          sql,
-          database,
-          templateParams,
-          datasourceName: this.state.datasetName,
-        });
-      }
-
-      //  Get chart dashboards
-      let sliceDashboards: number[] = [];
-      if (this.props.slice && this.state.action === 'overwrite') {
-        sliceDashboards = await this.props.actions.getSliceDashboards(
-          this.props.slice,
-        );
-      }
-
-      const formData = this.props.form_data || {};
-      delete formData.url_params;
-
-      let dashboard: DashboardGetResponse | null = null;
-      let selectedTabId: string | undefined;
-      if (this.state.dashboard) {
-        let validId = this.state.dashboard.value;
-        if (this.isNewDashboard()) {
-          const response = await this.props.actions.createDashboard(
-            this.state.dashboard.label,
-          );
-          validId = response.id;
-        }
-
-        try {
-          dashboard = await this.loadDashboard(validId as number);
-        } catch (error) {
-          this.props.actions.saveSliceFailed();
-          return;
-        }
-
-        if (isDefined(dashboard) && isDefined(dashboard?.id)) {
-          sliceDashboards = sliceDashboards.includes(dashboard.id)
-            ? sliceDashboards
-            : [...sliceDashboards, dashboard.id];
-          formData.dashboards = sliceDashboards;
-          if (
-            this.state.action === ChartStatusType.saveas &&
-            this.state.selectedTab?.value !== 'OUT_OF_TAB'
-          ) {
-            selectedTabId = this.state.selectedTab?.value as string;
-          }
-        }
-      }
-
-      // Sets the form data
-      this.props.actions.setFormData({ ...formData });
-
-      //  Update or create slice
-      let value: { id: number };
-      if (this.state.action === 'overwrite') {
-        value = await this.props.actions.updateSlice(
-          this.props.slice,
-          this.state.newSliceName,
-          sliceDashboards,
-          dashboard
-            ? {
-                title: dashboard.dashboard_title,
-                new: this.isNewDashboard(),
-              }
-            : null,
-        );
-      } else {
-        value = await this.props.actions.createSlice(
-          this.state.newSliceName,
-          sliceDashboards,
-          dashboard
-            ? {
-                title: dashboard.dashboard_title,
-                new: this.isNewDashboard(),
-              }
-            : null,
-        );
-        if (dashboard && selectedTabId) {
-          try {
-            await this.addChartToDashboardTab(
-              dashboard.id,
-              value.id,
-              selectedTabId,
-              this.state.newSliceName,
-            );
-          } catch (error) {
-            logging.error('Error adding chart to dashboard tab:', error);
-            this.props.addDangerToast(
-              t('Chart was saved but could not be added to the selected tab.'),
-            );
-          }
-        }
-      }
-
-      try {
-        if (dashboard) {
-          sessionStorage.setItem(SK_DASHBOARD_ID, `${dashboard.id}`);
-        } else {
-          sessionStorage.removeItem(SK_DASHBOARD_ID);
-        }
-      } catch (error) {
-        // continue regardless of error
-      }
-
-      // Go to new dashboard url
-      if (gotodash && dashboard) {
-        let { url } = dashboard;
-        if (this.state.selectedTab?.value) {
-          url += `#${this.state.selectedTab.value}`;
-        }
-        this.props.dispatch(removeChartState(value.id));
-        this.props.history.push(url);
-        return;
-      }
-      const searchParams = this.handleRedirect(window.location.search, value);
-      this.props.history.replace(`/explore/?${searchParams.toString()}`, {
-        saveAction: this.state.action,
-      });
-
-      this.setState({ isLoading: false });
-      this.onHide();
-    } finally {
-      this.setState({ isLoading: false });
-    }
-  }
-
-  /* Adds a chart to the specified dashboard tab. If an existing row has space, the chart is added there; otherwise, a new row is created.
-   * @param {number} dashboardId - ID of the dashboard.
-   * @param {number} chartId - ID of the chart to add.
-   * @param {string} tabId - ID of the dashboard tab where the chart is added.
-   * @param {string | undefined} sliceName - Chart name
-   */
-  addChartToDashboardTab = async (
-    dashboardId: number,
-    chartId: number,
-    tabId: string,
-    sliceName: string | undefined,
-  ) => {
-    try {
-      const dashboardResponse = await SupersetClient.get({
-        endpoint: `/api/v1/dashboard/${dashboardId}`,
-      });
-
-      const dashboard = dashboardResponse.json.result;
-
-      let positionJson = dashboard.position_json;
-      if (typeof positionJson === 'string') {
-        positionJson = JSON.parse(positionJson);
-      }
-      positionJson = positionJson || {};
-
-      const chartKey = `CHART-${chartId}`;
-
-      // Find a row in the tab with available space
-      const tabChildren = positionJson[tabId]?.children || [];
-      let targetRowKey: string | null = null;
-
-      for (const childKey of tabChildren) {
-        const child = positionJson[childKey];
-        if (child?.type === 'ROW') {
-          const rowChildren = child.children || [];
-          const totalWidth = rowChildren.reduce((sum: number, key: string) => {
-            const component = positionJson[key];
-            return sum + (component?.meta?.width || 0);
-          }, 0);
-
-          if (totalWidth + CHART_WIDTH <= GRID_COLUMN_COUNT) {
-            targetRowKey = childKey;
-            break;
-          }
-        }
-      }
-
-      const updatedPositionJson = { ...positionJson };
-
-      // Create a new row if no existing row has space
-      if (!targetRowKey) {
-        targetRowKey = `ROW-${nanoid()}`;
-        updatedPositionJson[targetRowKey] = {
-          type: 'ROW',
-          id: targetRowKey,
-          children: [],
-          parents: ['ROOT_ID', 'GRID_ID', tabId],
-          meta: {
-            background: 'BACKGROUND_TRANSPARENT',
-          },
-        };
-
-        if (positionJson[tabId]) {
-          updatedPositionJson[tabId] = {
-            ...positionJson[tabId],
-            children: [...(positionJson[tabId].children || []), targetRowKey],
-          };
-        } else {
-          throw new Error(`Tab ${tabId} not found in positionJson`);
-        }
-      }
-
-      updatedPositionJson[chartKey] = {
-        type: 'CHART',
-        id: chartKey,
+    if (!targetRowKey) {
+      targetRowKey = `ROW-${nanoid()}`;
+      updatedPositionJson[targetRowKey] = {
+        type: 'ROW',
+        id: targetRowKey,
         children: [],
-        parents: ['ROOT_ID', 'GRID_ID', tabId, targetRowKey],
+        parents: ['ROOT_ID', 'GRID_ID', tabId],
         meta: {
-          width: CHART_WIDTH,
-          height: CHART_HEIGHT,
-          chartId,
-          sliceName: sliceName ?? `Chart ${chartId}`,
+          background: 'BACKGROUND_TRANSPARENT',
         },
       };
 
-      // Add chart to the target row
-      updatedPositionJson[targetRowKey] = {
-        ...updatedPositionJson[targetRowKey],
-        children: [
-          ...(updatedPositionJson[targetRowKey].children || []),
-          chartKey,
-        ],
-      };
-
-      const response = await SupersetClient.put({
-        endpoint: `/api/v1/dashboard/${dashboardId}`,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          position_json: JSON.stringify(updatedPositionJson),
-        }),
-      });
-
-      return response;
-    } catch (error) {
-      throw new Error(`Error adding chart to dashboard tab: ${error}`);
+      if (positionJson[tabId]) {
+        updatedPositionJson[tabId] = {
+          ...positionJson[tabId],
+          children: [...(positionJson[tabId].children || []), targetRowKey],
+        };
+      } else {
+        throw new Error(`Tab ${tabId} not found in positionJson`);
+      }
     }
-  };
 
-  loadDashboard = async (id: number) => {
+    updatedPositionJson[chartKey] = {
+      type: 'CHART',
+      id: chartKey,
+      children: [],
+      parents: ['ROOT_ID', 'GRID_ID', tabId, targetRowKey],
+      meta: {
+        width: CHART_WIDTH,
+        height: CHART_HEIGHT,
+        chartId,
+        sliceName: sliceName ?? `Chart ${chartId}`,
+      },
+    };
+
+    updatedPositionJson[targetRowKey] = {
+      ...updatedPositionJson[targetRowKey],
+      children: [
+        ...(updatedPositionJson[targetRowKey].children || []),
+        chartKey,
+      ],
+    };
+
+    const response = await SupersetClient.put({
+      endpoint: `/api/v1/dashboard/${dashboardId}`,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        position_json: JSON.stringify(updatedPositionJson),
+      }),
+    });
+
+    return response;
+  } catch (error) {
+    throw new Error(`Error adding chart to dashboard tab: ${error}`);
+  }
+}
+
+function SaveModal({
+  addDangerToast,
+  actions,
+  form_data: formDataProp,
+  sliceName: sliceNameProp,
+}: SaveModalProps) {
+  const dispatch = useDispatch();
+  const history = useHistory();
+  const theme = useTheme();
+
+  const {
+    datasource,
+    slice,
+    user,
+    alert: alertProp,
+    isVisible,
+    dashboardId: dashboardIdProp,
+  } = useSelector(
+    ({
+      explore,
+      saveModal,
+      user: userState,
+    }: Record<string, Record<string, unknown>>) => ({
+      datasource: explore.datasource as Record<string, unknown> | undefined,
+      slice: explore.slice as Record<string, unknown> | undefined,
+      user: userState as unknown as UserWithPermissionsAndRoles,
+      alert: saveModal.saveModalAlert as string | undefined,
+      isVisible: saveModal.isVisible as boolean,
+      dashboardId: (explore.dashboardId ?? '') as '' | number | null,
+    }),
+  );
+
+  const canOverwriteSlice = useCallback(
+    (): boolean =>
+      !!(
+        (slice?.owners as number[] | undefined)?.includes(user.userId!) &&
+        !slice?.is_managed_externally
+      ),
+    [slice, user.userId],
+  );
+
+  const [newSliceName, setNewSliceName] = useState<string | undefined>(
+    sliceNameProp,
+  );
+  const [datasetName, setDatasetName] = useState<string>(
+    (datasource?.name as string) ?? '',
+  );
+  const [action, setAction] = useState<SaveActionType>(
+    canOverwriteSlice() ? ChartStatusType.overwrite : ChartStatusType.saveas,
+  );
+  const [isLoading, setIsLoading] = useState(false);
+  const [dashboard, setDashboard] = useState<
+    { label: string; value: string | number } | undefined
+  >();
+  const [tabsData, setTabsData] = useState<TabTreeNode[]>([]);
+  const [selectedTab, setSelectedTab] = useState<
+    { label: string; value: string | number } | undefined
+  >();
+
+  const isNewDashboard = useCallback(
+    (): boolean => typeof dashboard?.value === 'string',
+    [dashboard],
+  );
+
+  const loadDashboard = useCallback(async (id: number) => {
     const response = await SupersetClient.get({
       endpoint: `/api/v1/dashboard/${id}`,
     });
     return response.json.result;
-  };
+  }, []);
 
-  loadDashboards = async (search: string, page: number, pageSize: number) => {
-    const queryParams = rison.encode({
-      columns: ['id', 'dashboard_title'],
-      filters: [
-        {
-          col: 'dashboard_title',
-          opr: 'ct',
-          value: search,
-        },
-        {
-          col: 'owners',
-          opr: 'rel_m_m',
-          value: this.props.user.userId,
-        },
-      ],
-      page,
-      page_size: pageSize,
-      order_column: 'dashboard_title',
-    });
+  const loadTabs = useCallback(
+    async (dashId: number): Promise<TabTreeNode[]> => {
+      try {
+        const response = await SupersetClient.get({
+          endpoint: `/api/v1/dashboard/${dashId}/tabs`,
+        });
 
-    const { json } = await SupersetClient.get({
-      endpoint: `/api/v1/dashboard/?q=${queryParams}`,
-    });
-    const { result, count } = json;
-    return {
-      data: result.map(
-        (dashboard: { id: number; dashboard_title: string }) => ({
-          value: dashboard.id,
-          label: dashboard.dashboard_title,
-        }),
-      ),
-      totalCount: count,
-    };
-  };
-  // Loads dashboard tabs and returns the tab hierarchy for display.
-  loadTabs = async (dashboardId: number) => {
-    try {
-      const response = await SupersetClient.get({
-        endpoint: `/api/v1/dashboard/${dashboardId}/tabs`,
-      });
+        const { result } = response.json;
+        if (!result || !Array.isArray(result.tab_tree)) {
+          logging.warn('Invalid tabs response format');
+          setTabsData([]);
+          return [];
+        }
+        const tabTree = result.tab_tree;
+        const gridTabIds = new Set<string>();
+        const convertToTreeData = (nodes: TabNode[]): TabTreeNode[] =>
+          nodes.map(node => {
+            const isGridTab =
+              Array.isArray(node.parents) && node.parents.includes('GRID_ID');
+            if (isGridTab) {
+              gridTabIds.add(node.value);
+            }
+            return {
+              value: node.value,
+              title: node.title,
+              key: node.value,
+              children:
+                node.children && node.children.length > 0
+                  ? convertToTreeData(node.children)
+                  : undefined,
+            };
+          });
 
-      const { result } = response.json;
-      if (!result || !Array.isArray(result.tab_tree)) {
-        logging.warn('Invalid tabs response format');
-        this.setState({ tabsData: [] });
+        const treeData = convertToTreeData(tabTree);
+
+        if (gridTabIds.size > 0) {
+          const tabsDataWithOutOfTab = [
+            {
+              value: 'OUT_OF_TAB',
+              title: 'Out of tab',
+              key: 'OUT_OF_TAB',
+              children: undefined,
+            },
+            ...treeData,
+          ];
+
+          setTabsData(tabsDataWithOutOfTab);
+          setSelectedTab({ value: 'OUT_OF_TAB', label: 'Out of tab' });
+        } else {
+          const firstTab = treeData[0];
+          setTabsData(treeData);
+          setSelectedTab({ value: firstTab.value, label: firstTab.title });
+        }
+
+        return treeData;
+      } catch (error) {
+        logging.error('Error loading tabs:', error);
+        setTabsData([]);
         return [];
       }
-      const tabTree = result.tab_tree;
-      const gridTabIds = new Set<string>();
-      const convertToTreeData = (nodes: TabNode[]): TabTreeNode[] =>
-        nodes.map(node => {
-          const isGridTab =
-            Array.isArray(node.parents) && node.parents.includes('GRID_ID');
-          if (isGridTab) {
-            gridTabIds.add(node.value);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const initDashboard = async () => {
+      let resolvedId: number | '' | null = dashboardIdProp;
+      if (!resolvedId) {
+        let lastDashboard = null;
+        try {
+          lastDashboard = sessionStorage.getItem(SK_DASHBOARD_ID);
+        } catch {
+          // continue regardless of error
+        }
+        resolvedId = lastDashboard ? parseInt(lastDashboard, 10) : null;
+      }
+      if (resolvedId) {
+        try {
+          const result = (await loadDashboard(
+            resolvedId as number,
+          )) as Dashboard;
+          if (canUserEditDashboard(result, user)) {
+            setDashboard({
+              label: result.dashboard_title,
+              value: result.id,
+            });
+            await loadTabs(resolvedId as number);
           }
-          return {
-            value: node.value,
-            title: node.title,
-            key: node.value,
-            children:
-              node.children && node.children.length > 0
-                ? convertToTreeData(node.children)
-                : undefined,
-          };
-        });
+        } catch (error) {
+          logging.warn(error);
+          addDangerToast(
+            t('An error occurred while loading dashboard information.'),
+          );
+        }
+      }
+    };
+    initDashboard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-      const treeData = convertToTreeData(tabTree);
+  const onHide = useCallback(() => {
+    dispatch(setSaveChartModalVisibility(false));
+  }, [dispatch]);
 
-      // Add "Out of tab" option at the beginning
-      if (gridTabIds.size > 0) {
-        const tabsDataWithOutOfTab = [
-          {
-            value: 'OUT_OF_TAB',
-            title: 'Out of tab',
-            key: 'OUT_OF_TAB',
-            children: undefined,
-          },
-          ...treeData,
-        ];
+  const onSliceNameChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      setNewSliceName(event.target.value);
+    },
+    [],
+  );
 
-        this.setState({
-          tabsData: tabsDataWithOutOfTab,
-          selectedTab: { value: 'OUT_OF_TAB', label: 'Out of tab' },
-        });
+  const handleDatasetNameChange = useCallback(
+    (e: FormEvent<HTMLInputElement>) => {
+      setDatasetName((e.target as HTMLInputElement).value);
+    },
+    [],
+  );
+
+  const onDashboardChange = useCallback(
+    async (
+      dashboardValue: { label: string; value: string | number } | undefined,
+    ) => {
+      setDashboard(dashboardValue);
+      setTabsData([]);
+      setSelectedTab(undefined);
+
+      if (dashboardValue && typeof dashboardValue.value === 'number') {
+        await loadTabs(dashboardValue.value);
+      }
+    },
+    [loadTabs],
+  );
+
+  const changeAction = useCallback((newAction: SaveActionType) => {
+    setAction(newAction);
+  }, []);
+
+  const onTabChange = useCallback(
+    (value: string) => {
+      if (value) {
+        const findTabInTree = (data: TabTreeNode[]): TabTreeNode | null => {
+          for (const item of data) {
+            if (item.value === value) {
+              return item;
+            }
+            if (item.children) {
+              const found = findTabInTree(item.children);
+              if (found) return found;
+            }
+          }
+          return null;
+        };
+
+        const found = findTabInTree(tabsData);
+        if (found) {
+          setSelectedTab({
+            value: found.value,
+            label: found.title,
+          });
+        }
       } else {
-        const firstTab = treeData[0];
-        this.setState({
-          tabsData: treeData,
-          selectedTab: { value: firstTab.value, label: firstTab.title },
-        });
+        setSelectedTab(undefined);
+      }
+    },
+    [tabsData],
+  );
+
+  const loadDashboards = useCallback(
+    async (search: string, page: number, pageSize: number) => {
+      const queryParams = rison.encode({
+        columns: ['id', 'dashboard_title'],
+        filters: [
+          {
+            col: 'dashboard_title',
+            opr: 'ct',
+            value: search,
+          },
+          {
+            col: 'owners',
+            opr: 'rel_m_m',
+            value: user.userId,
+          },
+        ],
+        page,
+        page_size: pageSize,
+        order_column: 'dashboard_title',
+      });
+
+      const { json } = await SupersetClient.get({
+        endpoint: `/api/v1/dashboard/?q=${queryParams}`,
+      });
+      const { result, count } = json;
+      return {
+        data: result.map((dash: { id: number; dashboard_title: string }) => ({
+          value: dash.id,
+          label: dash.dashboard_title,
+        })),
+        totalCount: count,
+      };
+    },
+    [user.userId],
+  );
+
+  const saveOrOverwrite = useCallback(
+    async (gotodash: boolean) => {
+      setIsLoading(true);
+      const tableState = (formDataProp as Record<string, unknown> | undefined)
+        ?.table_state;
+      const sliceId = slice?.slice_id as number | undefined;
+      const vizType = (formDataProp as Record<string, unknown> | undefined)
+        ?.viz_type;
+      if (sliceId && vizType && tableState) {
+        dispatch(
+          updateChartState(
+            sliceId,
+            vizType as string,
+            tableState as Record<string, unknown>,
+          ),
+        );
       }
 
-      return treeData;
-    } catch (error) {
-      logging.error('Error loading tabs:', error);
-      this.setState({ tabsData: [] });
-      return [];
-    }
-  };
-
-  onTabChange = (value: string) => {
-    if (value) {
-      const findTabInTree = (data: TabTreeNode[]): TabTreeNode | null => {
-        for (const item of data) {
-          if (item.value === value) {
-            return item;
-          }
-          if (item.children) {
-            const found = findTabInTree(item.children);
-            if (found) return found;
-          }
-        }
-        return null;
+      type DashboardGetResponse = {
+        id: number;
+        url: string;
+        dashboard_title: string;
       };
 
-      const selectedTab = findTabInTree(this.state.tabsData);
-      if (selectedTab) {
-        this.setState({
-          selectedTab: {
-            value: selectedTab.value,
-            label: selectedTab.title,
-          },
+      try {
+        if (datasource?.type === DatasourceType.Query) {
+          const { schema, sql, database, templateParams } =
+            datasource as Record<string, unknown>;
+
+          await actions.saveDataset({
+            schema,
+            sql,
+            database,
+            templateParams,
+            datasourceName: datasetName,
+          });
+        }
+
+        let sliceDashboards: number[] = [];
+        if (slice && action === 'overwrite') {
+          sliceDashboards = await actions.getSliceDashboards(slice);
+        }
+
+        const formData = { ...formDataProp } as Record<string, unknown>;
+        delete formData.url_params;
+
+        let dashboardResult: DashboardGetResponse | null = null;
+        let selectedTabId: string | undefined;
+        if (dashboard) {
+          let validId = dashboard.value;
+          if (isNewDashboard()) {
+            const response = await actions.createDashboard(dashboard.label);
+            validId = response.id;
+          }
+
+          try {
+            dashboardResult = await loadDashboard(validId as number);
+          } catch {
+            actions.saveSliceFailed();
+            return;
+          }
+
+          if (isDefined(dashboardResult) && isDefined(dashboardResult!.id)) {
+            sliceDashboards = sliceDashboards.includes(dashboardResult!.id)
+              ? sliceDashboards
+              : [...sliceDashboards, dashboardResult!.id];
+            formData.dashboards = sliceDashboards;
+            if (
+              action === ChartStatusType.saveas &&
+              selectedTab?.value !== 'OUT_OF_TAB'
+            ) {
+              selectedTabId = selectedTab?.value as string;
+            }
+          }
+        }
+
+        actions.setFormData({ ...formData });
+
+        let value: { id: number };
+        if (action === 'overwrite') {
+          value = await actions.updateSlice(
+            slice,
+            newSliceName,
+            sliceDashboards,
+            dashboardResult
+              ? {
+                  title: dashboardResult.dashboard_title,
+                  new: isNewDashboard(),
+                }
+              : null,
+          );
+        } else {
+          value = await actions.createSlice(
+            newSliceName,
+            sliceDashboards,
+            dashboardResult
+              ? {
+                  title: dashboardResult.dashboard_title,
+                  new: isNewDashboard(),
+                }
+              : null,
+          );
+          if (dashboardResult && selectedTabId) {
+            try {
+              await addChartToDashboardTab(
+                dashboardResult.id,
+                value.id,
+                selectedTabId,
+                newSliceName,
+              );
+            } catch (error) {
+              logging.error('Error adding chart to dashboard tab:', error);
+              addDangerToast(
+                t(
+                  'Chart was saved but could not be added to the selected tab.',
+                ),
+              );
+            }
+          }
+        }
+
+        try {
+          if (dashboardResult) {
+            sessionStorage.setItem(SK_DASHBOARD_ID, `${dashboardResult.id}`);
+          } else {
+            sessionStorage.removeItem(SK_DASHBOARD_ID);
+          }
+        } catch {
+          // continue regardless of error
+        }
+
+        if (gotodash && dashboardResult) {
+          let { url } = dashboardResult;
+          if (selectedTab?.value) {
+            url += `#${selectedTab.value}`;
+          }
+          dispatch(removeChartState(value.id));
+          history.push(url);
+          return;
+        }
+        const searchParams = handleRedirect(window.location.search, value);
+        history.replace(`/explore/?${searchParams.toString()}`, {
+          saveAction: action,
         });
+
+        setIsLoading(false);
+        onHide();
+      } finally {
+        setIsLoading(false);
       }
-    } else {
-      this.setState({ selectedTab: undefined });
-    }
-  };
+    },
+    [
+      formDataProp,
+      slice,
+      datasource,
+      actions,
+      datasetName,
+      action,
+      dashboard,
+      selectedTab,
+      newSliceName,
+      isNewDashboard,
+      loadDashboard,
+      addDangerToast,
+      dispatch,
+      history,
+      onHide,
+    ],
+  );
 
-  renderSaveChartModal = () => {
-    const info = this.info();
-    const canOverwriteSlice = this.canOverwriteSlice();
-    return (
-      <Form data-test="save-modal-body" layout="vertical">
-        <FormItem data-test="radio-group">
-          <Radio
-            id="overwrite-radio"
-            disabled={!canOverwriteSlice}
-            checked={this.state.action === 'overwrite'}
-            onChange={() => this.changeAction('overwrite')}
-            data-test="save-overwrite-radio"
-          >
-            {t('Save (Overwrite)')}
-          </Radio>
-          {this.props.slice && !canOverwriteSlice && (
-            <div>
-              <Typography.Text type="secondary">
-                {this.props.slice.is_managed_externally
-                  ? t(
-                      "This chart is managed externally and can't be overwritten in Superset.",
-                    )
-                  : t(
-                      'Must be a chart owner to overwrite this chart. Save as a new chart instead.',
-                    )}
-              </Typography.Text>
-            </div>
-          )}
-          <Radio
-            id="saveas-radio"
-            data-test="saveas-radio"
-            checked={this.state.action === ChartStatusType.saveas}
-            onChange={() => this.changeAction('saveas')}
-          >
-            {t('Save as...')}
-          </Radio>
-        </FormItem>
-        <Divider />
-        <FormItem label={t('Chart name')} required>
-          <Input
-            name="new_slice_name"
-            type="text"
-            placeholder={t('Name')}
-            value={this.state.newSliceName}
-            onChange={this.onSliceNameChange}
-            data-test="new-chart-name"
-          />
-        </FormItem>
-        {this.props.datasource?.type === 'query' && (
-          <FormItem
-            label={
-              <Flex align="center" gap={this.props.theme.sizeUnit}>
-                {t('Dataset Name')}
-                <InfoTooltip
-                  data-test="info-tooltip-icon"
-                  tooltip={t(
-                    'A reusable dataset will be saved with your chart.',
-                  )}
-                  placement="right"
-                />
-              </Flex>
-            }
-            required
-          >
-            <Input
-              name="dataset_name"
-              type="text"
-              placeholder={t('Dataset Name')}
-              value={this.state.datasetName}
-              onChange={this.handleDatasetNameChange}
-              data-test="new-dataset-name"
-            />
-          </FormItem>
-        )}
-        <FormItem
-          label={t('Add to dashboard')}
-          data-test="save-chart-modal-select-dashboard-form"
-        >
-          <AsyncSelect
-            allowClear
-            allowNewOptions
-            ariaLabel={t('Select a dashboard')}
-            options={this.loadDashboards}
-            onChange={this.onDashboardChange}
-            value={this.state.dashboard}
-            placeholder={
-              <div>
-                <b>{t('Select')}</b>
-                {t(' a dashboard OR ')}
-                <b>{t('create')}</b>
-                {t(' a new one')}
-              </div>
-            }
-          />
-        </FormItem>
-        {this.state.action === ChartStatusType.saveas && (
-          <FormItem
-            label={t('Add to tabs')}
-            data-test="save-chart-modal-select-tabs-form"
-          >
-            <TreeSelect
-              showSearch
-              allowClear
-              treeDefaultExpandAll
-              treeData={this.state.tabsData}
-              onChange={this.onTabChange}
-              value={this.state.selectedTab?.value}
-              disabled={
-                !this.state.dashboard ||
-                typeof this.state.dashboard.value === 'string' ||
-                this.state.tabsData.length === 0
-              }
-              placeholder={t('Select a tab')}
-            />
-          </FormItem>
-        )}
-        {info && <Alert type="info" message={info} closable={false} />}
-        {this.props.alert && (
-          <Alert
-            css={{ marginTop: info ? 16 : undefined }}
-            type="warning"
-            message={this.props.alert}
-            closable={false}
-          />
-        )}
-      </Form>
-    );
-  };
-
-  info = () => {
-    const isNewDashboard = this.isNewDashboard();
+  const info = useCallback((): string | null => {
+    const isDashNew = isNewDashboard();
     let chartWillBeCreated = false;
-    if (
-      this.props.slice &&
-      (this.state.action !== 'overwrite' || !this.canOverwriteSlice())
-    ) {
+    if (slice && (action !== 'overwrite' || !canOverwriteSlice())) {
       chartWillBeCreated = true;
     }
-    if (chartWillBeCreated && isNewDashboard) {
+    if (chartWillBeCreated && isDashNew) {
       return t('A new chart and dashboard will be created.');
     }
     if (chartWillBeCreated) {
       return t('A new chart will be created.');
     }
-    if (isNewDashboard) {
+    if (isDashNew) {
       return t('A new dashboard will be created.');
     }
     return null;
-  };
+  }, [isNewDashboard, slice, action, canOverwriteSlice]);
 
-  renderFooter = () => (
+  const canOverwrite = canOverwriteSlice();
+  const infoMessage = info();
+
+  const renderSaveChartModal = () => (
+    <Form data-test="save-modal-body" layout="vertical">
+      <FormItem data-test="radio-group">
+        <Radio
+          id="overwrite-radio"
+          disabled={!canOverwrite}
+          checked={action === 'overwrite'}
+          onChange={() => changeAction('overwrite')}
+          data-test="save-overwrite-radio"
+        >
+          {t('Save (Overwrite)')}
+        </Radio>
+        {slice && !canOverwrite && (
+          <div>
+            <Typography.Text type="secondary">
+              {slice.is_managed_externally
+                ? t(
+                    "This chart is managed externally and can't be overwritten in Superset.",
+                  )
+                : t(
+                    'Must be a chart owner to overwrite this chart. Save as a new chart instead.',
+                  )}
+            </Typography.Text>
+          </div>
+        )}
+        <Radio
+          id="saveas-radio"
+          data-test="saveas-radio"
+          checked={action === ChartStatusType.saveas}
+          onChange={() => changeAction('saveas')}
+        >
+          {t('Save as...')}
+        </Radio>
+      </FormItem>
+      <Divider />
+      <FormItem label={t('Chart name')} required>
+        <Input
+          name="new_slice_name"
+          type="text"
+          placeholder={t('Name')}
+          value={newSliceName}
+          onChange={onSliceNameChange}
+          data-test="new-chart-name"
+        />
+      </FormItem>
+      {datasource?.type === 'query' && (
+        <FormItem
+          label={
+            <Flex align="center" gap={theme.sizeUnit}>
+              {t('Dataset Name')}
+              <InfoTooltip
+                data-test="info-tooltip-icon"
+                tooltip={t('A reusable dataset will be saved with your chart.')}
+                placement="right"
+              />
+            </Flex>
+          }
+          required
+        >
+          <Input
+            name="dataset_name"
+            type="text"
+            placeholder={t('Dataset Name')}
+            value={datasetName}
+            onChange={handleDatasetNameChange}
+            data-test="new-dataset-name"
+          />
+        </FormItem>
+      )}
+      <FormItem
+        label={t('Add to dashboard')}
+        data-test="save-chart-modal-select-dashboard-form"
+      >
+        <AsyncSelect
+          allowClear
+          allowNewOptions
+          ariaLabel={t('Select a dashboard')}
+          options={loadDashboards}
+          onChange={onDashboardChange}
+          value={dashboard}
+          placeholder={
+            <div>
+              <b>{t('Select')}</b>
+              {t(' a dashboard OR ')}
+              <b>{t('create')}</b>
+              {t(' a new one')}
+            </div>
+          }
+        />
+      </FormItem>
+      {action === ChartStatusType.saveas && (
+        <FormItem
+          label={t('Add to tabs')}
+          data-test="save-chart-modal-select-tabs-form"
+        >
+          <TreeSelect
+            showSearch
+            allowClear
+            treeDefaultExpandAll
+            treeData={tabsData}
+            onChange={onTabChange}
+            value={selectedTab?.value}
+            disabled={
+              !dashboard ||
+              typeof dashboard.value === 'string' ||
+              tabsData.length === 0
+            }
+            placeholder={t('Select a tab')}
+          />
+        </FormItem>
+      )}
+      {infoMessage && (
+        <Alert type="info" message={infoMessage} closable={false} />
+      )}
+      {alertProp && (
+        <Alert
+          css={{ marginTop: infoMessage ? 16 : undefined }}
+          type="warning"
+          message={alertProp}
+          closable={false}
+        />
+      )}
+    </Form>
+  );
+
+  const renderFooter = () => (
     <div data-test="save-modal-footer">
       <Button
         id="btn_cancel"
         buttonSize="small"
-        onClick={this.onHide}
+        onClick={onHide}
         buttonStyle="secondary"
       >
         {t('Cancel')}
@@ -760,12 +789,11 @@ class SaveModal extends Component<SaveModalProps, SaveModalState> {
         id="btn_modal_save_goto_dash"
         buttonSize="small"
         disabled={
-          !this.state.newSliceName ||
-          !this.state.dashboard ||
-          (this.props.datasource?.type !== DatasourceType.Table &&
-            !this.state.datasetName)
+          !newSliceName ||
+          !dashboard ||
+          (datasource?.type !== DatasourceType.Table && !datasetName)
         }
-        onClick={() => this.saveOrOverwrite(true)}
+        onClick={() => saveOrOverwrite(true)}
       >
         {t('Save & go to dashboard')}
       </Button>
@@ -773,12 +801,11 @@ class SaveModal extends Component<SaveModalProps, SaveModalState> {
         id="btn_modal_save"
         buttonSize="small"
         buttonStyle="primary"
-        onClick={() => this.saveOrOverwrite(false)}
+        onClick={() => saveOrOverwrite(false)}
         disabled={
-          this.state.isLoading ||
-          !this.state.newSliceName ||
-          (this.props.datasource?.type !== DatasourceType.Table &&
-            !this.state.datasetName)
+          isLoading ||
+          !newSliceName ||
+          (datasource?.type !== DatasourceType.Table && !datasetName)
         }
         data-test="btn-modal-save"
       >
@@ -787,56 +814,27 @@ class SaveModal extends Component<SaveModalProps, SaveModalState> {
     </div>
   );
 
-  render() {
-    return (
-      <StyledModal
-        show={this.props.isVisible}
-        onHide={this.onHide}
-        title={t('Save chart')}
-        footer={this.renderFooter()}
-      >
-        {this.state.isLoading ? (
-          <div
-            css={css`
-              display: flex;
-              justify-content: center;
-            `}
-          >
-            <Loading position="normal" />
-          </div>
-        ) : (
-          this.renderSaveChartModal()
-        )}
-      </StyledModal>
-    );
-  }
+  return (
+    <StyledModal
+      show={isVisible}
+      onHide={onHide}
+      title={t('Save chart')}
+      footer={renderFooter()}
+    >
+      {isLoading ? (
+        <div
+          css={css`
+            display: flex;
+            justify-content: center;
+          `}
+        >
+          <Loading position="normal" />
+        </div>
+      ) : (
+        renderSaveChartModal()
+      )}
+    </StyledModal>
+  );
 }
 
-interface StateProps {
-  datasource: any;
-  slice: any;
-  user: UserWithPermissionsAndRoles;
-  dashboards: any;
-  alert: any;
-  isVisible: boolean;
-}
-
-function mapStateToProps({
-  explore,
-  saveModal,
-  user,
-}: Record<string, any>): StateProps {
-  return {
-    datasource: explore.datasource,
-    slice: explore.slice,
-    user,
-    dashboards: saveModal.dashboards,
-    alert: saveModal.saveModalAlert,
-    isVisible: saveModal.isVisible,
-  };
-}
-
-export default withRouter(connect(mapStateToProps)(withTheme(SaveModal)));
-
-// User for testing purposes need to revisit once we convert this to functional component
-export { SaveModal as PureSaveModal };
+export default SaveModal;
