@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from flask import Flask
 from flask_babel import lazy_gettext as _
-from sqlalchemy import Table, text, TypeDecorator
+from sqlalchemy import MetaData, select, Table, text, TypeDecorator
 from sqlalchemy.engine import Connection, Dialect, Row
 from sqlalchemy_utils import EncryptedType as SqlaEncryptedType
 
@@ -174,8 +174,10 @@ class SecretsMigrator:
         column_names: list[str],
         table_name: str,
     ) -> Row:
-        cols = ",".join(pk_columns + column_names)
-        return conn.execute(f"SELECT {cols} FROM {table_name}")  # noqa: S608
+        meta = MetaData()
+        tbl = Table(table_name, meta, autoload_with=conn)
+        stmt = select(*[tbl.c[c] for c in pk_columns + column_names])
+        return conn.execute(stmt)
 
     def _re_encrypt_row(
         self,
