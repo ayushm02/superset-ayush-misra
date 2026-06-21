@@ -601,7 +601,7 @@ DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     # =================================================================
     # IN TESTING
     # =================================================================
-    # These features are finished but currently being tested.
+    # These features have completed development and are in the testing phase.
     # They are usable, but may still contain some bugs.
     # -----------------------------------------------------------------
     # Enables filter functionality in Alerts and Reports
