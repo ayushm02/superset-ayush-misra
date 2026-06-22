@@ -34,6 +34,19 @@ import {
 import { getSectionsToRender } from './getSectionsToRender';
 import { getControlConfig } from './getControlConfig';
 
+/**
+ * A wider variant of ControlPanelState accepted by functions that pass
+ * state through to mapStateToProps callbacks. It allows datasource to
+ * be a minimal `{ type: string }` shape so callers outside of the
+ * chart-controls package do not need an unsafe `as any` cast.
+ */
+export type ControlPanelStateLike = Omit<
+  Partial<ControlPanelState>,
+  'datasource'
+> & {
+  datasource?: ControlPanelState['datasource'] | { type: string } | null;
+};
+
 type ValidationError = JsonValue;
 
 function execControlValidator<T = ControlType>(
@@ -85,7 +98,7 @@ function handleMissingChoice<T = ControlType>(control: ControlState<T>) {
 
 export function applyMapStateToPropsToControl<T = ControlType>(
   controlState: ControlState<T>,
-  controlPanelState: Partial<ControlPanelState> | null,
+  controlPanelState: ControlPanelStateLike | null,
 ) {
   const { mapStateToProps } = controlState;
   let state = { ...controlState };
@@ -136,7 +149,7 @@ export function applyMapStateToPropsToControl<T = ControlType>(
 
 export function getControlStateFromControlConfig<T = ControlType>(
   controlConfig: ControlConfig<T> | null,
-  controlPanelState: Partial<ControlPanelState> | null,
+  controlPanelState: ControlPanelStateLike | null,
   value?: JsonValue,
 ) {
   // skip invalid config values
@@ -168,7 +181,7 @@ export function getControlState(
 export function getAllControlsState(
   vizType: string,
   datasourceType: DatasourceType,
-  state: ControlPanelState | null,
+  state: ControlPanelStateLike | null,
   formData: QueryFormData,
 ) {
   const controlsState: Record<string, ControlState<any> | null> = {};
