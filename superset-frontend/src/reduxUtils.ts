@@ -22,73 +22,62 @@ import persistState, { StorageAdapter } from 'redux-localstorage';
 import { isEqual, omitBy, omit, isEqualWith } from 'lodash';
 import { ensureIsArray } from '@superset-ui/core';
 
-export function addToObject(
-  state: Record<string, any>,
-  arrKey: string,
-  obj: Record<string, any>,
-) {
-  const newObject = { ...state[arrKey] };
-  const copiedObject = { ...obj };
+export function addToObject<
+  S extends Record<string, unknown>,
+  T extends Record<string, unknown> & { id?: string },
+>(state: S, arrKey: string, obj: T): S {
+  const newObject = { ...(state[arrKey] as Record<string, T>) };
+  const copiedObject = { ...obj, id: obj.id || nanoid() };
 
-  if (!copiedObject.id) {
-    copiedObject.id = nanoid();
-  }
   newObject[copiedObject.id] = copiedObject;
-  return { ...state, [arrKey]: newObject };
+  return { ...state, [arrKey]: newObject } as S;
 }
 
-export function alterInObject(
-  state: Record<string, any>,
-  arrKey: string,
-  obj: Record<string, any>,
-  alterations: Record<string, any>,
-) {
-  const newObject = { ...state[arrKey] };
-  newObject[obj.id] = { ...newObject[obj.id], ...alterations };
-  return { ...state, [arrKey]: newObject };
+export function alterInObject<
+  S extends Record<string, unknown>,
+  T extends Record<string, unknown> & { id?: string },
+>(state: S, arrKey: string, obj: T, alterations: Partial<T>): S {
+  const newObject = { ...(state[arrKey] as Record<string, T>) };
+  newObject[obj.id!] = { ...newObject[obj.id!], ...alterations } as T;
+  return { ...state, [arrKey]: newObject } as S;
 }
 
-export function alterInArr(
-  state: Record<string, any>,
-  arrKey: string,
-  obj: Record<string, any>,
-  alterations: Record<string, any>,
-  idKey = 'id',
-) {
+export function alterInArr<
+  S extends Record<string, unknown>,
+  T extends Record<string, unknown>,
+>(state: S, arrKey: string, obj: T, alterations: Partial<T>, idKey = 'id'): S {
   // Finds an item in an array in the state and replaces it with a
   // new object with an altered property
-  const newArr: unknown[] = [];
-  state[arrKey].forEach((arrItem: Record<string, any>) => {
+  const newArr: T[] = [];
+  (state[arrKey] as T[]).forEach((arrItem: T) => {
     if (obj[idKey] === arrItem[idKey]) {
-      newArr.push({ ...arrItem, ...alterations });
+      newArr.push({ ...arrItem, ...alterations } as T);
     } else {
       newArr.push(arrItem);
     }
   });
-  return { ...state, [arrKey]: newArr };
+  return { ...state, [arrKey]: newArr } as S;
 }
 
-export function removeFromArr(
-  state: Record<string, any>,
-  arrKey: string,
-  obj: Record<string, any>,
-  idKey = 'id',
-) {
-  const newArr: unknown[] = [];
-  state[arrKey].forEach((arrItem: Record<string, any>) => {
+export function removeFromArr<
+  S extends Record<string, unknown>,
+  T extends Record<string, unknown>,
+>(state: S, arrKey: string, obj: T, idKey = 'id'): S {
+  const newArr: T[] = [];
+  (state[arrKey] as T[]).forEach((arrItem: T) => {
     if (!(obj[idKey] === arrItem[idKey])) {
       newArr.push(arrItem);
     }
   });
-  return { ...state, [arrKey]: newArr };
+  return { ...state, [arrKey]: newArr } as S;
 }
 
-export function getFromArr(
-  arr: Record<string, any>[],
+export function getFromArr<T extends Record<string, unknown>>(
+  arr: T[],
   id: string,
   idKey = 'id',
-) {
-  let obj;
+): T | undefined {
+  let obj: T | undefined;
   arr.forEach(o => {
     if (o[idKey] === id) {
       obj = o;
@@ -97,45 +86,34 @@ export function getFromArr(
   return obj;
 }
 
-export function addToArr(
-  state: Record<string, any>,
-  arrKey: string,
-  obj: Record<string, any>,
-  prepend = false,
-) {
-  const newObj = { ...obj };
-  if (!newObj.id) {
-    newObj.id = nanoid();
-  }
-  const newState: Record<string, any[]> = {};
+export function addToArr<
+  S extends Record<string, unknown>,
+  T extends Record<string, unknown> & { id?: string },
+>(state: S, arrKey: string, obj: T, prepend = false): S {
+  const newObj = { ...obj, id: obj.id || nanoid() };
+  const newState: Record<string, T[]> = {};
   if (prepend) {
-    newState[arrKey] = [newObj, ...state[arrKey]];
+    newState[arrKey] = [newObj, ...(state[arrKey] as T[])];
   } else {
-    newState[arrKey] = [...state[arrKey], newObj];
+    newState[arrKey] = [...(state[arrKey] as T[]), newObj];
   }
-  return { ...state, ...newState };
+  return { ...state, ...newState } as S;
 }
 
-export function extendArr(
-  state: Record<string, any>,
-  arrKey: string,
-  arr: Record<string, any>[],
-  prepend = false,
-) {
-  const newArr = [...arr];
-  newArr.forEach(el => {
-    if (!el.id) {
-      /* eslint-disable no-param-reassign */
-      el.id = nanoid();
-    }
-  });
-  const newState: Record<string, any[]> = {};
+export function extendArr<
+  S extends Record<string, unknown>,
+  T extends Record<string, unknown> & { id?: string },
+>(state: S, arrKey: string, arr: T[], prepend = false): S {
+  const newArr: T[] = arr.map(el =>
+    el.id ? el : ({ ...el, id: nanoid() } as T),
+  );
+  const newState: Record<string, T[]> = {};
   if (prepend) {
-    newState[arrKey] = [...newArr, ...state[arrKey]];
+    newState[arrKey] = [...newArr, ...(state[arrKey] as T[])];
   } else {
-    newState[arrKey] = [...state[arrKey], ...newArr];
+    newState[arrKey] = [...(state[arrKey] as T[]), ...newArr];
   }
-  return { ...state, ...newState };
+  return { ...state, ...newState } as S;
 }
 
 export function initEnhancer(
@@ -183,8 +161,8 @@ export function areArraysShallowEqual(arr1: unknown[], arr2: unknown[]) {
 }
 
 export function areObjectsEqual(
-  obj1: any,
-  obj2: any,
+  obj1: Record<string, unknown>,
+  obj2: Record<string, unknown>,
   opts: {
     ignoreUndefined?: boolean;
     ignoreNull?: boolean;
