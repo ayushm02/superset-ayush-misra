@@ -108,11 +108,10 @@ export function getControlsState(
     formData.viz_type || state.common?.conf.DEFAULT_VIZ_TYPE || VizType.Table;
 
   handleDeprecatedControls(formData);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const controlsState = getAllControlsState(
     vizType,
     state.datasource.type as DatasourceType,
-    state as any,
+    state,
     formData,
   );
 
