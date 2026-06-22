@@ -454,4 +454,4 @@ class StdOutEventLogger(AbstractEventLogger):
             curated_form_data=curated_form_data,
             **kwargs,
         )
-        print("StdOutEventLogger: ", data)
+        logger.info("StdOutEventLogger: %s", data)
