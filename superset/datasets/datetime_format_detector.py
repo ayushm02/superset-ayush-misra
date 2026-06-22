@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import sqlalchemy as sa
 from flask import current_app
 
 from superset.connectors.sqla.models import SqlaTable, TableColumn
@@ -88,35 +89,22 @@ class DatetimeFormatDetector:
             return None
 
         try:
-            # Build SQL query using database's identifier quoting
-            # Note: Column and table names come from internal metadata, not user input
             database: Database = dataset.database
 
-            # Get the database engine's dialect for proper identifier quoting
+            # Build SQL query using SQLAlchemy Core constructs.
+            # The WHERE IS NOT NULL filter is intentionally omitted:
+            # detect_datetime_format() already calls dropna(), and the
+            # predicate forces engines like ClickHouse to scan the entire
+            # table even with LIMIT, triggering max_rows_to_read errors.
+            col_expr = sa.column(column.column_name)
+            tbl_expr = sa.table(
+                dataset.table_name,
+                schema=dataset.schema or None,
+            )
+            stmt = sa.select(col_expr).select_from(tbl_expr)
+
             with database.get_sqla_engine() as engine:
-                dialect = engine.dialect
-
-                # Quote identifiers using the dialect's identifier preparer
-                column_name_quoted = dialect.identifier_preparer.quote(
-                    column.column_name
-                )
-                table_name_quoted = dialect.identifier_preparer.quote(
-                    dataset.table_name
-                )
-
-                if dataset.schema:
-                    schema_quoted = dialect.identifier_preparer.quote(dataset.schema)
-                    full_table = f"{schema_quoted}.{table_name_quoted}"
-                else:
-                    full_table = table_name_quoted
-
-                # Build SQL query string with quoted identifiers.
-                # The WHERE IS NOT NULL filter is intentionally omitted:
-                # detect_datetime_format() already calls dropna(), and the
-                # predicate forces engines like ClickHouse to scan the entire
-                # table even with LIMIT, triggering max_rows_to_read errors.
-                # S608: false positive - using dialect's identifier preparer
-                sql = f"SELECT {column_name_quoted} FROM {full_table}"  # noqa: S608
+                sql = stmt.compile(dialect=engine.dialect).string
 
             # Apply database-specific LIMIT using apply_limit_to_sql
             # This handles different SQL dialects (LIMIT, TOP, FETCH FIRST, etc.)
