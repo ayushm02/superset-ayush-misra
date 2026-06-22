@@ -28,6 +28,8 @@ from .base import BaseSupersetView
 
 
 class BaseAlertReportView(BaseSupersetView):
+    """Base view for Alert and Report schedule management."""
+
     route_base = "/report"
     class_permission_name = "ReportSchedule"
 
@@ -35,6 +37,7 @@ class BaseAlertReportView(BaseSupersetView):
     @has_access
     @permission_name("read")
     def list(self) -> FlaskResponse:
+        """Render the alert/report list page, or 404 if the feature is disabled."""
         if not is_feature_enabled("ALERT_REPORTS"):
             return abort(404)
         return super().render_app_template()
@@ -43,6 +46,7 @@ class BaseAlertReportView(BaseSupersetView):
     @has_access
     @permission_name("read")
     def log(self, pk: int) -> FlaskResponse:  # pylint: disable=unused-argument
+        """Render the alert/report log page, or 404 if the feature is disabled."""
         if not is_feature_enabled("ALERT_REPORTS"):
             return abort(404)
 
